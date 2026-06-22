@@ -8,23 +8,23 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout do código
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Configurar Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.9'
 
-      - name: Instalar dependências
+      - name: Install dependencies
         run: |
           pip install requests pandas gspread oauth2client google-api-python-client google-auth
 
-      - name: Criar arquivo de credenciais
+      - name: Create credentials file
         run: |
           echo '${{ secrets.GOOGLE_CREDENTIALS }}' > teste-477018-5cb1426a435b.json
 
-      - name: Rodar script
+      - name: Run script
         run: python API_MB1.py
         env:
           TOKEN_SGA: ${{ secrets.TOKEN_SGA }}
