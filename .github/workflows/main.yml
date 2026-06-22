@@ -9,16 +9,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout do código
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Configurar Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.9'
 
       - name: Instalar dependências
         run: |
-          pip install requests pandas gspread oauth2client
+          pip install requests pandas gspread oauth2client google-api-python-client google-auth
 
       - name: Criar arquivo de credenciais
         run: |
