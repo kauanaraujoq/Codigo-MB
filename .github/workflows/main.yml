@@ -1,12 +1,19 @@
 name: Executar API
+
 on:
   schedule:
-    - cron: '0 9 * * *'
+    - cron: '0 10 * * *'  # 07:00 BR
+    - cron: '0 16 * * *'  # 13:00 BR
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
+    concurrency:
+      group: api-pipeline
+      cancel-in-progress: false
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -14,7 +21,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
