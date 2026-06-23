@@ -2,8 +2,8 @@ name: Executar API
 
 on:
   schedule:
-    - cron: '0 10 * * *'  # 07:00 BR
-    - cron: '0 16 * * *'  # 13:00 BR
+    - cron: '17 10 * * *'  # 07:17 Brasil
+    - cron: '17 16 * * *'  # 13:17 Brasil
   workflow_dispatch:
 
 jobs:
