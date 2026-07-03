@@ -1,21 +1,18 @@
 name: Executar API
 on:
   schedule:
-    # Base - todos os dias (2x) - compensado com atraso médio real (17 amostras)
-    - cron: '42 3 * * *'    # agenda 00:42 BR -> tende a rodar ~07:20 BR
+    # Base - todos os dias (2x) - compensado com atraso médio real
+    - cron: '12 2 * * *'    # agenda 23:12 BR (dia anterior) -> tende a rodar ~05:50 BR
     - cron: '20 11 * * *'   # agenda 08:20 BR -> tende a rodar ~13:20 BR
-
     # Extra sexta-feira (dow=5) -> total 4x nas sextas
     - cron: '22 6 * * 5'    # agenda 03:22 BR -> tende a rodar ~10:00 BR
     - cron: '0 14 * * 5'    # agenda 11:00 BR -> tende a rodar ~16:00 BR
-
     # Extra dias 30/31 (dom=30,31) -> total 6x nesses dias
     - cron: '22 4 30,31 * *'   # agenda 01:22 BR -> tende a rodar ~08:00 BR
     - cron: '22 7 30,31 * *'   # agenda 04:22 BR -> tende a rodar ~11:00 BR
     - cron: '0 14 30,31 * *'   # agenda 11:00 BR -> tende a rodar ~16:00 BR
     - cron: '0 16 30,31 * *'   # agenda 13:00 BR -> tende a rodar ~18:00 BR
   workflow_dispatch:
-
 jobs:
   build:
     runs-on: ubuntu-latest
