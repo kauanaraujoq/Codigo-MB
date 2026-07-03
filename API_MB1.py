@@ -105,10 +105,8 @@ resposta = requests.post(url_autenticacao, headers=headers, json=payload)
 if resposta.status_code == 200:
     dados = resposta.json()
     print("✅ Autenticação bem-sucedida!")
-    print(json.dumps(dados, indent=2, ensure_ascii=False))
-    token_usuario = dados.get("token_usuario") or dados.get("token_usuário")  # depende do campo exato
-    print("\n🔑 Seu token de acesso (use nas próximas requisições):")
-    print(token_usuario)
+    token_usuario = dados.get("token_usuario") or dados.get("token_usuário")
+    print(f"🔑 Token obtido com sucesso (tamanho: {len(token_usuario) if token_usuario else 0} caracteres)")
 else:
     print(f"❌ Erro {resposta.status_code}: {resposta.text}")
 
