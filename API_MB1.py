@@ -102,13 +102,18 @@ payload = {
 resposta = requests.post(url_autenticacao, headers=headers, json=payload)
 
 # === 5️⃣ TRATAR RETORNO ===
+# ⚠️ CORREÇÃO DE SEGURANÇA: removido o print do JSON completo e do token em texto puro.
+# Como o repositório é público, os logs do GitHub Actions ficam visíveis para
+# qualquer usuário autenticado no GitHub. Imprimir o token aqui o expunha publicamente.
 if resposta.status_code == 200:
     dados = resposta.json()
-    print("✅ Autenticação bem-sucedida!")
-    token_usuario = dados.get("token_usuario") or dados.get("token_usuário")
-    print(f"🔑 Token obtido com sucesso (tamanho: {len(token_usuario) if token_usuario else 0} caracteres)")
+    token_usuario = dados.get("token_usuario") or dados.get("token_usuário")  # depende do campo exato
+    if token_usuario:
+        print(f"✅ Autenticação bem-sucedida! Token obtido ({len(token_usuario)} caracteres).")
+    else:
+        print("⚠️ Autenticação retornou 200, mas nenhum token foi encontrado na resposta.")
 else:
-    print(f"❌ Erro {resposta.status_code}: {resposta.text}")
+    print(f"❌ Erro {resposta.status_code} na autenticação.")
 
 # %%
 # ==============================
@@ -154,7 +159,7 @@ def get_eventos(data_inicio, data_fim):
             break
 
         if response.status_code != 200:
-            print(f"❌ Erro {response.status_code}: {response.text}")
+            print(f"❌ Erro {response.status_code} ao buscar eventos.")
             break
 
         dados = response.json()
@@ -305,7 +310,7 @@ headers = {
 response = requests.get(URL, headers=headers, timeout=30)
 
 if response.status_code != 200:
-    raise Exception(f"Erro {response.status_code}: {response.text}")
+    raise Exception(f"Erro {response.status_code} ao buscar situações.")
 
 dados = response.json()
 
@@ -456,17 +461,17 @@ headers = {
 resposta = requests.get(URL_base + situacao, headers=headers)
 
 if resposta.status_code == 200:
-    print("Requisição bem-sucedida!\n")
-    
+    print("✅ Requisição bem-sucedida!\n")
+
     dados = resposta.json()
-    
+
     # Converte em DataFrame
     df = pd.DataFrame(dados)
-    
+
     print("\n📊 DataFrame gerado:")
     print(df.head())
 else:
-    print(f"❌ Erro {resposta.status_code}: {resposta.text}")
+    print(f"❌ Erro {resposta.status_code} na requisição de situação de evento.")
 
 if not df.empty:
     df = df.fillna('')  # substitui NaN por string vazia
@@ -539,7 +544,7 @@ def get_veiculos_por_situacao(codigo_situacao):
             break
 
         if response.status_code != 200:
-            print(f"❌ Erro {response.status_code}: {response.text}")
+            print(f"❌ Erro {response.status_code} ao buscar veículos.")
             break
 
         dados = response.json()
@@ -689,7 +694,6 @@ while current_start < end_date:
         print(f"✅ Dados de {payload['from']} a {payload['to']} coletados. Total acumulado: {len(all_data)}")
     else:
         print(f"❌ Erro na requisição {response.status_code} de {payload['from']} a {payload['to']}")
-        print(response.text)
 
         time.sleep(3)
 
@@ -718,5 +722,3 @@ if not df.empty:
     print("✅ Dados enviados para o Google Sheets com conta de serviço!")
 else:
     print("⚠️ DataFrame vazio, nada enviado para o Google Sheets.")
-
-
