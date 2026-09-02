@@ -11,45 +11,94 @@ from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
 
 
-def enviar_para_sheets_em_lotes(service, spreadsheet_id, sheet_name, df, tamanho_lote=500):
+def enviar_para_sheets_em_lotes(
+    service,
+    spreadsheet_id,
+    sheet_name,
+    df,
+    tamanho_lote=200
+):
     """
-    Envia DataFrame para Google Sheets em blocos, evitando timeout.
+    Envia DataFrame para Google Sheets em blocos menores,
+    com retry e tratamento de timeout.
     """
 
     if df.empty:
         print("⚠️ DataFrame vazio.")
         return
 
-    # limpeza
+    # Limpeza
     df = df.fillna("")
     df = df.astype(str)
     df = df.apply(
         lambda x: x.str.encode("utf-8", "ignore").str.decode("utf-8")
     )
 
-    # limpa a aba antes de escrever
-    service.spreadsheets().values().clear(
-        spreadsheetId=spreadsheet_id,
-        range=sheet_name
-    ).execute()
+    # ==============================
+    # LIMPAR ABA COM RETRY
+    # ==============================
+
+    print(f"🧹 Limpando aba '{sheet_name}'...")
+
+    for tentativa in range(1, 4):
+        try:
+            service.spreadsheets().values().clear(
+                spreadsheetId=spreadsheet_id,
+                range=sheet_name
+            ).execute()
+
+            print("✅ Aba limpa com sucesso.")
+            break
+
+        except Exception as e:
+
+            print(
+                f"⚠️ Erro ao limpar aba "
+                f"(tentativa {tentativa}/3): {e}"
+            )
+
+            if tentativa == 3:
+                raise Exception(
+                    f"❌ Não foi possível limpar a aba '{sheet_name}'."
+                )
+
+            time.sleep(5)
+
+    # ==============================
+    # PREPARAR DADOS
+    # ==============================
 
     dados = [df.columns.tolist()] + df.values.tolist()
 
     total_lotes = math.ceil(len(dados) / tamanho_lote)
 
+    print(
+        f"📊 Total de linhas: {len(dados)} | "
+        f"Total de lotes: {total_lotes}"
+    )
+
+    # ==============================
+    # ENVIO DOS LOTES
+    # ==============================
+
     for i in range(0, len(dados), tamanho_lote):
 
-        lote = dados[i:i+tamanho_lote]
+        lote = dados[i:i + tamanho_lote]
 
         linha_inicial = i + 1
 
-        tentativa = 0
+        numero_lote = i // tamanho_lote + 1
 
-        while tentativa < 3:
+        for tentativa in range(1, 6):
+
             try:
+
                 print(
-                    f"📤 Enviando lote {i//tamanho_lote + 1}/{total_lotes} "
-                    f"- linhas {linha_inicial} até {linha_inicial + len(lote)-1}"
+                    f"📤 Enviando lote "
+                    f"{numero_lote}/{total_lotes} "
+                    f"- linhas {linha_inicial} até "
+                    f"{linha_inicial + len(lote) - 1} "
+                    f"(tentativa {tentativa}/5)"
                 )
 
                 service.spreadsheets().values().update(
@@ -59,21 +108,53 @@ def enviar_para_sheets_em_lotes(service, spreadsheet_id, sheet_name, df, tamanho
                     body={"values": lote}
                 ).execute()
 
-                break
-
-            except Exception as e:
-                tentativa += 1
-
                 print(
-                    f"⚠️ Erro no lote. Tentativa {tentativa}/3: {e}"
+                    f"✅ Lote {numero_lote}/{total_lotes} enviado."
                 )
 
-                time.sleep(5)
+                break
 
-        else:
-            raise Exception(
-                f"Falha ao enviar lote iniciado na linha {linha_inicial}"
-            )
+            except TimeoutError as e:
+
+                print(
+                    f"⏱️ Timeout no lote {numero_lote}. "
+                    f"Tentativa {tentativa}/5."
+                )
+
+                if tentativa == 5:
+                    raise Exception(
+                        f"❌ Timeout persistente no lote "
+                        f"{numero_lote}."
+                    )
+
+                espera = 5 * tentativa
+
+                print(
+                    f"⏳ Aguardando {espera}s antes de tentar novamente..."
+                )
+
+                time.sleep(espera)
+
+            except Exception as e:
+
+                print(
+                    f"⚠️ Erro no lote {numero_lote}: {e}"
+                )
+
+                if tentativa == 5:
+                    raise Exception(
+                        f"❌ Falha ao enviar lote "
+                        f"{numero_lote}, linha inicial "
+                        f"{linha_inicial}: {e}"
+                    )
+
+                espera = 5 * tentativa
+
+                print(
+                    f"⏳ Aguardando {espera}s antes de tentar novamente..."
+                )
+
+                time.sleep(espera)
 
     print("✅ Todos os lotes enviados com sucesso.")
 
