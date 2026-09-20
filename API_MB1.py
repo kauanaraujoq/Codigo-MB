@@ -355,7 +355,7 @@ def get_eventos(data_inicio, data_fim):
 
     inicio_paginacao = 0
 
-    quantidade_por_pagina = 100
+    quantidade_por_pagina = 1500
 
     while True:
 
@@ -1059,7 +1059,7 @@ def get_veiculos_por_situacao(
 
     inicio_paginacao = 0
 
-    quantidade_por_pagina = 1000
+    quantidade_por_pagina = 1500
 
     while True:
 
