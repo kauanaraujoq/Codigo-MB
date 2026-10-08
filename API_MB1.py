@@ -9,30 +9,17 @@ from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
 
 # ============================================================
-# 1. FUNÇÃO AUXILIAR: CARGA EM LOTES NO GOOGLE SHEETS
+# 1. FUNÇÃO DE ENVIO EM LOTES PARA O GOOGLE SHEETS
 # ============================================================
-def enviar_para_sheets_em_lotes(
-    service,
-    spreadsheet_id,
-    sheet_name,
-    df,
-    tamanho_lote=200
-):
-    """
-    Limpa a aba informada e envia o DataFrame para o Google Sheets em blocos.
-    """
+def enviar_para_sheets_em_lotes(service, spreadsheet_id, sheet_name, df, tamanho_lote=200):
     if df.empty:
         print(f"⚠️ DataFrame vazio para a aba '{sheet_name}'. Nada enviado.")
         return
 
-    # Limpeza e padronização UTF-8
     df = df.fillna("")
     df = df.astype(str)
-    df = df.apply(
-        lambda x: x.str.encode("utf-8", "ignore").str.decode("utf-8")
-    )
+    df = df.apply(lambda x: x.str.encode("utf-8", "ignore").str.decode("utf-8"))
 
-    # ---------------- LIMPAR ABA ----------------
     print(f"🧹 Limpando aba '{sheet_name}'...")
     for tentativa in range(1, 4):
         try:
@@ -48,7 +35,6 @@ def enviar_para_sheets_em_lotes(
                 raise Exception(f"❌ Não foi possível limpar a aba '{sheet_name}'.")
             time.sleep(5)
 
-    # ---------------- PREPARAR E ENVIAR DADOS ----------------
     dados = [df.columns.tolist()] + df.values.tolist()
     total_lotes = math.ceil(len(dados) / tamanho_lote)
 
@@ -61,11 +47,7 @@ def enviar_para_sheets_em_lotes(
 
         for tentativa in range(1, 6):
             try:
-                print(
-                    f"📤 Enviando lote {numero_lote}/{total_lotes} "
-                    f"- linhas {linha_inicial} até {linha_inicial + len(lote) - 1} "
-                    f"(tentativa {tentativa}/5)"
-                )
+                print(f"📤 Enviando lote {numero_lote}/{total_lotes} - linhas {linha_inicial} até {linha_inicial + len(lote) - 1}")
                 service.spreadsheets().values().update(
                     spreadsheetId=spreadsheet_id,
                     range=f"{sheet_name}!A{linha_inicial}",
@@ -74,11 +56,6 @@ def enviar_para_sheets_em_lotes(
                 ).execute()
                 print(f"✅ Lote {numero_lote}/{total_lotes} enviado.")
                 break
-            except TimeoutError:
-                print(f"⏱️ Timeout no lote {numero_lote}. Tentativa {tentativa}/5.")
-                if tentativa == 5:
-                    raise Exception(f"❌ Timeout persistente no lote {numero_lote}.")
-                time.sleep(5 * tentativa)
             except Exception as e:
                 print(f"⚠️ Erro no lote {numero_lote}: {e}")
                 if tentativa == 5:
@@ -89,22 +66,57 @@ def enviar_para_sheets_em_lotes(
 
 
 # ============================================================
-# 2. CONFIGURAÇÕES INICIAIS E AUTENTICAÇÃO GOOGLE
+# 2. CONFIGURAÇÕES E AUTENTICAÇÃO
 # ============================================================
 print("🔎 Verificando variáveis de ambiente...")
 
 TOKEN_SGA = os.environ.get("TOKEN_SGA")
+USUARIO_API = os.environ.get("USUARIO_API")
+SENHA_API = os.environ.get("SENHA_API")
 TOKEN_CRM = os.environ.get("TOKEN_CRM")
+
 SPREADSHEET_ID = "1og7UWrfw0kJ2ju53gtP44F3X97q5vLIiQh2GPpLz_Xo"
 SERVICE_ACCOUNT_FILE = "teste-477018-5cb1426a435b.json"
 
-print("TOKEN_SGA:", "OK" if TOKEN_SGA else "AUSENTE")
-print("TOKEN_CRM:", "OK" if TOKEN_CRM else "AUSENTE")
+if not all([TOKEN_SGA, USUARIO_API, SENHA_API]):
+    raise SystemExit("❌ Variáveis TOKEN_SGA, USUARIO_API ou SENHA_API ausentes.")
 
-if not TOKEN_SGA:
-    raise SystemExit("❌ TOKEN_SGA não foi encontrado nas variáveis de ambiente.")
+# ---------------- AUTENTICAÇÃO NA HINOVA ----------------
+print("🔐 Autenticando na API Hinova...")
+url_autenticacao = "https://api.hinova.com.br/api/sga/v2/usuario/autenticar"
+headers_auth = {
+    "Authorization": f"Bearer {TOKEN_SGA}",
+    "Content-Type": "application/json"
+}
+payload_auth = {
+    "usuario": USUARIO_API,
+    "senha": SENHA_API
+}
 
-# Inicializa credenciais do Google Sheets (prioriza ficheiro local, fallback para Secret JSON)
+res_auth = requests.post(url_autenticacao, headers=headers_auth, json=payload_auth, timeout=30)
+
+if res_auth.status_code != 200:
+    print(f"❌ Erro {res_auth.status_code} na autenticação:")
+    print(res_auth.text)
+    raise SystemExit(1)
+
+dados_auth = res_auth.json()
+token_usuario = dados_auth.get("token_usuario") or dados_auth.get("token_usuário")
+
+if not token_usuario:
+    print("❌ Token de usuário não retornado pela API.")
+    raise SystemExit(1)
+
+print(f"✅ Autenticação realizada com sucesso!")
+
+# Cabeçalho padrão usando o token de usuário gerado
+headers_sga = {
+    "Authorization": f"Bearer {token_usuario}",
+    "Content-Type": "application/json",
+    "Accept": "application/json"
+}
+
+# ---------------- CONEXÃO GOOGLE SHEETS ----------------
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 if os.path.exists(SERVICE_ACCOUNT_FILE):
@@ -112,17 +124,11 @@ if os.path.exists(SERVICE_ACCOUNT_FILE):
 else:
     google_creds_json = os.environ.get("GOOGLE_CREDENTIALS")
     if not google_creds_json:
-        raise SystemExit("❌ Credenciais do Google não encontradas (ficheiro JSON ou secret GOOGLE_CREDENTIALS).")
+        raise SystemExit("❌ Credenciais do Google não encontradas.")
     info = json.loads(google_creds_json)
     creds = Credentials.from_service_account_info(info, scopes=SCOPES)
 
 service = build("sheets", "v4", credentials=creds)
-
-headers_sga = {
-    "Content-Type": "application/json",
-    "Accept": "application/json",
-    "Authorization": f"Bearer {TOKEN_SGA}"
-}
 
 
 # ============================================================
