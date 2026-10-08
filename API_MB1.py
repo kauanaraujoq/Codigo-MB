@@ -9,11 +9,84 @@ from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
 
 # ============================================================
-# 1. FUNÇÃO DE ENVIO EM LOTES PARA O GOOGLE SHEETS
+# 0. CONFIGURAÇÕES GERAIS
 # ============================================================
-def enviar_para_sheets_em_lotes(service, spreadsheet_id, sheet_name, df, tamanho_lote=200):
+SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "1og7UWrfw0kJ2ju53gtP44F3X97q5vLIiQh2GPpLz_Xo")
+SERVICE_ACCOUNT_FILE = "teste-477018-5cb1426a435b.json"
+
+DATA_INICIO_HISTORICO = "01/01/2023"
+JANELA_DIAS = int(os.environ.get("JANELA_DIAS", "30"))              # tamanho de cada janela de busca
+DIAS_INCREMENTAL = int(os.environ.get("DIAS_INCREMENTAL", "90"))    # quantos dias reprocessar no modo incremental
+MODO_EVENTOS = os.environ.get("MODO_EVENTOS", "incremental").lower()  # "incremental" ou "completo"
+PAUSA_ENTRE_REQUISICOES = 1.0
+TAMANHO_LOTE_SHEETS = 2000
+
+headers_sga = {}  # preenchido após obter o token
+
+
+# ============================================================
+# 1. REQUISIÇÃO PROTEGIDA PARA A API HINOVA
+# ============================================================
+def hinova_request(method, url, **kwargs):
+    """Faz a chamada à Hinova. Se o token estiver bloqueado, ENCERRA o script na hora."""
+    kwargs.setdefault("timeout", (30, 120))
+    r = None
+    for tentativa in range(1, 4):
+        try:
+            r = requests.request(method, url, headers=headers_sga, **kwargs)
+        except (requests.Timeout, requests.ConnectionError) as e:
+            print(f"⚠️ Erro de rede (tentativa {tentativa}/3): {e}")
+            time.sleep(10 * tentativa)
+            continue
+
+        if r.status_code == 403 and "BLOQUEADO" in r.text.upper():
+            raise SystemExit(
+                "❌ Token BLOQUEADO pela Hinova. Execução interrompida para não piorar o bloqueio. "
+                "Aguarde ~1h antes de rodar novamente."
+            )
+        if r.status_code in (429, 500, 502, 503, 504):
+            print(f"⚠️ HTTP {r.status_code} (tentativa {tentativa}/3). Aguardando...")
+            time.sleep(10 * tentativa)
+            continue
+        return r
+
+    if r is None:
+        raise RuntimeError(f"Sem resposta da API após 3 tentativas: {url}")
+    return r
+
+
+# ============================================================
+# 2. FUNÇÕES DO GOOGLE SHEETS
+# ============================================================
+def _a1(sheet_name, cell=None):
+    nome = f"'{sheet_name}'"
+    return f"{nome}!{cell}" if cell else nome
+
+
+def ler_aba_como_df(service, spreadsheet_id, sheet_name):
+    """Lê a aba inteira como DataFrame de strings. Retorna None se vazia ou com erro."""
+    try:
+        res = service.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id,
+            range=_a1(sheet_name)
+        ).execute()
+    except Exception as e:
+        print(f"⚠️ Não foi possível ler a aba '{sheet_name}': {e}")
+        return None
+
+    valores = res.get("values", [])
+    if len(valores) < 2:
+        return None
+
+    cab = valores[0]
+    n = len(cab)
+    linhas = [(l + [""] * (n - len(l)))[:n] for l in valores[1:]]
+    return pd.DataFrame(linhas, columns=cab)
+
+
+def enviar_para_sheets_em_lotes(service, spreadsheet_id, sheet_name, df, tamanho_lote=TAMANHO_LOTE_SHEETS):
     if df.empty:
-        print(f"⚠️ DataFrame vazio para a aba '{sheet_name}'. Nada enviado.")
+        print(f"⚠️ DataFrame vazio para a aba '{sheet_name}'. Nada enviado (aba preservada).")
         return
 
     df = df.fillna("")
@@ -25,7 +98,7 @@ def enviar_para_sheets_em_lotes(service, spreadsheet_id, sheet_name, df, tamanho
         try:
             service.spreadsheets().values().clear(
                 spreadsheetId=spreadsheet_id,
-                range=sheet_name
+                range=_a1(sheet_name)
             ).execute()
             print("✅ Aba limpa com sucesso.")
             break
@@ -50,7 +123,7 @@ def enviar_para_sheets_em_lotes(service, spreadsheet_id, sheet_name, df, tamanho
                 print(f"📤 Enviando lote {numero_lote}/{total_lotes} - linhas {linha_inicial} até {linha_inicial + len(lote) - 1}")
                 service.spreadsheets().values().update(
                     spreadsheetId=spreadsheet_id,
-                    range=f"{sheet_name}!A{linha_inicial}",
+                    range=_a1(sheet_name, f"A{linha_inicial}"),
                     valueInputOption="RAW",
                     body={"values": lote}
                 ).execute()
@@ -60,65 +133,60 @@ def enviar_para_sheets_em_lotes(service, spreadsheet_id, sheet_name, df, tamanho
                 print(f"⚠️ Erro no lote {numero_lote}: {e}")
                 if tentativa == 5:
                     raise Exception(f"❌ Falha ao enviar lote {numero_lote}: {e}")
-                time.sleep(5 * tentativa)
+                time.sleep(10 * tentativa)
+        time.sleep(1)  # respeita a cota de escrita do Sheets
 
     print(f"✅ Envio para a aba '{sheet_name}' concluído com sucesso.\n")
 
 
 # ============================================================
-# 2. CONFIGURAÇÕES E AUTENTICAÇÃO
+# 3. AUTENTICAÇÃO
 # ============================================================
-print("🔎 Verificando variáveis de ambiente...")
+def obter_token_usuario():
+    """Prioriza o secret TOKEN_USUARIO (não expira). Só autentica se ele não existir."""
+    token = os.environ.get("TOKEN_USUARIO")
+    if token:
+        print("🔐 Usando TOKEN_USUARIO do ambiente (sem chamada de autenticação).")
+        return token
 
-TOKEN_SGA = os.environ.get("TOKEN_SGA")
-USUARIO_API = os.environ.get("USUARIO_API")
-SENHA_API = os.environ.get("SENHA_API")
+    print("⚠️ TOKEN_USUARIO ausente. Autenticando UMA vez como fallback...")
+    token_sga = os.environ.get("TOKEN_SGA")
+    usuario = os.environ.get("USUARIO_API")
+    senha = os.environ.get("SENHA_API")
+    if not all([token_sga, usuario, senha]):
+        raise SystemExit("❌ Defina TOKEN_USUARIO, ou TOKEN_SGA + USUARIO_API + SENHA_API.")
+
+    res = requests.post(
+        "https://api.hinova.com.br/api/sga/v2/usuario/autenticar",
+        headers={"Authorization": f"Bearer {token_sga}", "Content-Type": "application/json"},
+        json={"usuario": usuario, "senha": senha},
+        timeout=30
+    )
+    if res.status_code != 200:
+        print(f"❌ Erro {res.status_code} na autenticação:\n{res.text}")
+        raise SystemExit(1)
+
+    dados = res.json()
+    token = dados.get("token_usuario") or dados.get("token_usuário")
+    if not token:
+        print("❌ Token de usuário não retornado pela API.")
+        print("Resposta recebida:", res.text)
+        raise SystemExit(1)
+
+    print("✅ Autenticação realizada. Salve este token como secret TOKEN_USUARIO para não autenticar mais.")
+    return token
+
+
+print("🔎 Iniciando...")
+TOKEN_USUARIO = obter_token_usuario()
 TOKEN_CRM = os.environ.get("TOKEN_CRM")
 
-SPREADSHEET_ID = "1og7UWrfw0kJ2ju53gtP44F3X97q5vLIiQh2GPpLz_Xo"
-SERVICE_ACCOUNT_FILE = "teste-477018-5cb1426a435b.json"
-
-if not all([TOKEN_SGA, USUARIO_API, SENHA_API]):
-    raise SystemExit("❌ Variáveis TOKEN_SGA, USUARIO_API ou SENHA_API ausentes.")
-
-# ---------------- AUTENTICAÇÃO NA HINOVA ----------------
-print("🔐 Autenticando na API Hinova...")
-url_autenticacao = "https://api.hinova.com.br/api/sga/v2/usuario/autenticar"
-
-headers_auth = {
-    "Authorization": f"Bearer {TOKEN_SGA}",
-    "Content-Type": "application/json"
-}
-payload_auth = {
-    "usuario": USUARIO_API,
-    "senha": SENHA_API
-}
-
-res_auth = requests.post(url_autenticacao, headers=headers_auth, json=payload_auth, timeout=30)
-
-if res_auth.status_code != 200:
-    print(f"❌ Erro {res_auth.status_code} na autenticação:")
-    print(res_auth.text)
-    raise SystemExit(1)
-
-dados_auth = res_auth.json()
-token_usuario = dados_auth.get("token_usuario") or dados_auth.get("token_usuário")
-
-if not token_usuario:
-    print("❌ Token de usuário não retornado pela API.")
-    print("Resposta recebida:", res_auth.text)
-    raise SystemExit(1)
-
-print("✅ Autenticação realizada com sucesso!")
-
-# Cabeçalho oficial para todas as rotinas SGA utilizando o token obtido
 headers_sga = {
-    "Authorization": f"Bearer {token_usuario}",
+    "Authorization": f"Bearer {TOKEN_USUARIO}",
     "Content-Type": "application/json",
     "Accept": "application/json"
 }
 
-# ---------------- CONEXÃO GOOGLE SHEETS ----------------
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 if os.path.exists(SERVICE_ACCOUNT_FILE):
@@ -132,13 +200,17 @@ else:
 
 service = build("sheets", "v4", credentials=creds)
 
+falhas = []
+
 
 # ============================================================
-# ROTINA 1: EVENTOS SGA (LISTAR)
+# ROTINA 1: EVENTOS SGA (INCREMENTAL)
 # ============================================================
-print("\n============================================================")
-print("🚀 ROTINA 1: EVENTOS SGA")
-print("============================================================")
+def sub(d, chave):
+    """Retorna o sub-dicionário com segurança (a API pode devolver null)."""
+    v = d.get(chave)
+    return v if isinstance(v, dict) else {}
+
 
 def get_eventos(data_inicio, data_fim):
     url = "https://api.hinova.com.br/api/sga/v2/listar/evento"
@@ -154,27 +226,39 @@ def get_eventos(data_inicio, data_fim):
             "quantidade_por_pagina": quantidade_por_pagina
         }
 
-        response = requests.post(url, headers=headers_sga, json=payload, timeout=(30, 120))
+        response = hinova_request("POST", url, json=payload)
 
-        if response.status_code == 406:
+        if response.status_code == 406:  # sem registros no período
             break
         if response.status_code != 200:
-            print(f"❌ Erro {response.status_code} ao buscar eventos: {response.text}")
-            break
+            # NÃO engolir o erro: abortar evita sobrescrever a planilha com dados parciais
+            raise RuntimeError(f"Erro {response.status_code} ao buscar eventos "
+                               f"({data_inicio} a {data_fim}): {response.text}")
 
         dados = response.json()
         if not isinstance(dados, list) or len(dados) == 0:
             break
 
         eventos.extend(dados)
+
+        if len(dados) < quantidade_por_pagina:  # última página: evita requisição extra
+            break
+
         inicio_paginacao += quantidade_por_pagina
-        time.sleep(0.5)
+        time.sleep(PAUSA_ENTRE_REQUISICOES)
 
     return eventos
+
 
 def transformar_eventos_df(eventos):
     linhas = []
     for e in eventos:
+        assoc = sub(e, "associado")
+        veic = sub(e, "veiculo")
+        cond = sub(e, "condutor")
+        reg = sub(e, "regional")
+        coop = sub(e, "cooperativa")
+        vol = sub(e, "voluntario")
         linha = {
             "codigo_evento": e.get("codigo_evento"),
             "codigo_classificacao": e.get("codigo_classificacao"),
@@ -197,80 +281,109 @@ def transformar_eventos_df(eventos):
             "bairro": e.get("bairro"),
             "logradouro": e.get("logradouro"),
             "cep": e.get("cep"),
-            "associado_nome": e.get("associado", {}).get("nome"),
-            "associado_cpf": e.get("associado", {}).get("cpf"),
-            "associado_email": e.get("associado", {}).get("email"),
-            "associado_telefone": e.get("associado", {}).get("telefone"),
-            "veiculo_placa": e.get("veiculo", {}).get("placa"),
-            "veiculo_modelo": e.get("veiculo", {}).get("modelo"),
-            "veiculo_marca": e.get("veiculo", {}).get("marca"),
-            "veiculo_ano_modelo": e.get("veiculo", {}).get("ano_modelo"),
-            "veiculo_ano_fabricacao": e.get("veiculo", {}).get("ano_fabricacao"),
-            "veiculo_valor_fipe": e.get("veiculo", {}).get("valor_fipe"),
-            "condutor_nome": e.get("condutor", {}).get("nome"),
-            "condutor_cpf": e.get("condutor", {}).get("cpf"),
-            "condutor_cidade": e.get("condutor", {}).get("cidade"),
-            "condutor_estado": e.get("condutor", {}).get("estado"),
-            "regional": e.get("regional", {}).get("descricao"),
-            "cooperativa": e.get("cooperativa", {}).get("descricao"),
-            "voluntario": e.get("voluntario", {}).get("descricao")
+            "associado_nome": assoc.get("nome"),
+            "associado_cpf": assoc.get("cpf"),
+            "associado_email": assoc.get("email"),
+            "associado_telefone": assoc.get("telefone"),
+            "veiculo_placa": veic.get("placa"),
+            "veiculo_modelo": veic.get("modelo"),
+            "veiculo_marca": veic.get("marca"),
+            "veiculo_ano_modelo": veic.get("ano_modelo"),
+            "veiculo_ano_fabricacao": veic.get("ano_fabricacao"),
+            "veiculo_valor_fipe": veic.get("valor_fipe"),
+            "condutor_nome": cond.get("nome"),
+            "condutor_cpf": cond.get("cpf"),
+            "condutor_cidade": cond.get("cidade"),
+            "condutor_estado": cond.get("estado"),
+            "regional": reg.get("descricao"),
+            "cooperativa": coop.get("descricao"),
+            "voluntario": vol.get("descricao")
         }
         linhas.append(linha)
     return pd.DataFrame(linhas)
 
+
 def coletar_eventos_periodo(data_inicio_str):
     data_inicio = datetime.strptime(data_inicio_str, "%d/%m/%Y")
     data_fim = datetime.today()
-    delta_dias = 30
     all_eventos = []
     current_start = data_inicio
 
     while current_start <= data_fim:
-        current_end = min(current_start + timedelta(days=delta_dias - 1), data_fim)
+        current_end = min(current_start + timedelta(days=JANELA_DIAS - 1), data_fim)
         print(f"⏳ Buscando eventos de {current_start.strftime('%d/%m/%Y')} até {current_end.strftime('%d/%m/%Y')}...")
         bloco = get_eventos(current_start.strftime("%d/%m/%Y"), current_end.strftime("%d/%m/%Y"))
         all_eventos.extend(bloco)
         current_start = current_end + timedelta(days=1)
+        time.sleep(PAUSA_ENTRE_REQUISICOES)
 
     return all_eventos
 
-eventos_totais = coletar_eventos_periodo("01/01/2023")
-df_eventos = transformar_eventos_df(eventos_totais)
-print(f"✅ Total de eventos coletados: {len(df_eventos)}")
 
-enviar_para_sheets_em_lotes(service, SPREADSHEET_ID, "EVENTOS SGA - LISTAR", df_eventos)
+def rotina_eventos():
+    print("\n============================================================")
+    print("🚀 ROTINA 1: EVENTOS SGA")
+    print("============================================================")
+    aba = "EVENTOS SGA - LISTAR"
+
+    existente = None
+    if MODO_EVENTOS == "incremental":
+        existente = ler_aba_como_df(service, SPREADSHEET_ID, aba)
+        if existente is not None and "codigo_evento" not in existente.columns:
+            existente = None
+
+    if existente is not None:
+        data_inicio = (datetime.today() - timedelta(days=DIAS_INCREMENTAL)).strftime("%d/%m/%Y")
+        print(f"♻️ Modo INCREMENTAL: {len(existente)} linhas na aba. Buscando desde {data_inicio}.")
+    else:
+        data_inicio = DATA_INICIO_HISTORICO
+        print(f"📚 Modo COMPLETO: buscando desde {data_inicio}.")
+
+    eventos = coletar_eventos_periodo(data_inicio)
+    df_novo = transformar_eventos_df(eventos)
+    print(f"✅ Eventos coletados nesta execução: {len(df_novo)}")
+
+    if df_novo.empty:
+        print("⚠️ Nenhum evento retornado. Aba preservada sem alterações.")
+        return
+
+    if existente is not None:
+        df_novo_str = df_novo.fillna("").astype(str)
+        existente = existente.reindex(columns=df_novo_str.columns, fill_value="")
+        df_final = pd.concat([existente, df_novo_str], ignore_index=True)
+        df_final = df_final.drop_duplicates(subset="codigo_evento", keep="last")
+        print(f"🔀 Total após mesclar: {len(df_final)} linhas.")
+    else:
+        df_final = df_novo
+
+    enviar_para_sheets_em_lotes(service, SPREADSHEET_ID, aba, df_final)
 
 
 # ============================================================
 # ROTINA 2: DIMENSÃO SITUAÇÃO (SGA)
 # ============================================================
-print("\n============================================================")
-print("🚀 ROTINA 2: DIM_SITUACAO")
-print("============================================================")
+def rotina_situacao():
+    print("\n============================================================")
+    print("🚀 ROTINA 2: DIM_SITUACAO")
+    print("============================================================")
 
-url_situacao = "https://api.hinova.com.br/api/sga/v2/listar/situacao/todos"
-res_sit = requests.get(url_situacao, headers=headers_sga, timeout=30)
+    res = hinova_request("GET", "https://api.hinova.com.br/api/sga/v2/listar/situacao/todos", timeout=30)
+    if res.status_code != 200:
+        raise RuntimeError(f"Erro {res.status_code} ao buscar situações: {res.text}")
 
-if res_sit.status_code == 200:
-    dados_sit = res_sit.json()
-    if isinstance(dados_sit, dict):
-        dados_sit = [dados_sit]
-    df_situacao = pd.DataFrame(dados_sit)
-    if not df_situacao.empty and "codigo_situacao" in df_situacao.columns:
-        df_situacao = df_situacao.sort_values("codigo_situacao")
-    print(f"✅ Total de situações coletadas: {len(df_situacao)}")
-    enviar_para_sheets_em_lotes(service, SPREADSHEET_ID, "DIM_SITUACAO", df_situacao)
-else:
-    print(f"❌ Erro {res_sit.status_code} ao buscar situações: {res_sit.text}")
+    dados = res.json()
+    if isinstance(dados, dict):
+        dados = [dados]
+    df = pd.DataFrame(dados)
+    if not df.empty and "codigo_situacao" in df.columns:
+        df = df.sort_values("codigo_situacao")
+    print(f"✅ Total de situações coletadas: {len(df)}")
+    enviar_para_sheets_em_lotes(service, SPREADSHEET_ID, "DIM_SITUACAO", df)
 
 
 # ============================================================
 # ROTINA 3: VOLUNTÁRIOS ATIVOS (SGA)
 # ============================================================
-print("\n============================================================")
-print("🚀 ROTINA 3: VOLUNTÁRIOS SGA")
-print("============================================================")
-
 def get_voluntarios():
     url_voluntario = "https://api.hinova.com.br/api/sga/v2/listar/voluntario/ativo"
     voluntarios = []
@@ -278,14 +391,11 @@ def get_voluntarios():
     registros_por_pagina = 5000
 
     while True:
-        url_paginada = f"{url_voluntario}?pagina={pagina}"
-        response = requests.get(url_paginada, headers=headers_sga, timeout=30)
+        res = hinova_request("GET", f"{url_voluntario}?pagina={pagina}", timeout=30)
+        if res.status_code != 200:
+            raise RuntimeError(f"Erro {res.status_code} na página {pagina}: {res.text}")
 
-        if response.status_code != 200:
-            print(f"❌ Erro {response.status_code} na página {pagina}: {response.text}")
-            break
-
-        dados = response.json()
+        dados = res.json()
         qtd = len(dados) if isinstance(dados, list) else 0
         if qtd == 0:
             break
@@ -296,14 +406,17 @@ def get_voluntarios():
         if qtd < registros_por_pagina:
             break
         pagina += 1
-        time.sleep(0.5)
+        time.sleep(PAUSA_ENTRE_REQUISICOES)
 
     return voluntarios
+
 
 def transformar_voluntarios_df(voluntarios):
     linhas = []
     for v in voluntarios:
-        cooperativas = ", ".join([c.get("nome_cooperativa", "") for c in v.get("cooperativas", [])])
+        cooperativas = ", ".join(
+            [(c.get("nome_cooperativa") or "") for c in (v.get("cooperativas") or []) if isinstance(c, dict)]
+        )
         linha = {
             "codigo_voluntario": v.get("codigo_voluntario"),
             "nome": v.get("nome"),
@@ -330,40 +443,45 @@ def transformar_voluntarios_df(voluntarios):
         linhas.append(linha)
     return pd.DataFrame(linhas)
 
-voluntarios_totais = get_voluntarios()
-df_voluntarios = transformar_voluntarios_df(voluntarios_totais)
-print(f"✅ Total de voluntários: {len(df_voluntarios)}")
 
-enviar_para_sheets_em_lotes(service, SPREADSHEET_ID, "Voluntarios SGA", df_voluntarios)
+def rotina_voluntarios():
+    print("\n============================================================")
+    print("🚀 ROTINA 3: VOLUNTÁRIOS SGA")
+    print("============================================================")
+    df = transformar_voluntarios_df(get_voluntarios())
+    print(f"✅ Total de voluntários: {len(df)}")
+    enviar_para_sheets_em_lotes(service, SPREADSHEET_ID, "Voluntarios SGA", df)
 
 
 # ============================================================
 # ROTINA 4: SITUAÇÃO DE EVENTO ATIVOS (SGA)
 # ============================================================
-print("\n============================================================")
-print("🚀 ROTINA 4: SITUAÇÃO DE EVENTO ATIVOS")
-print("============================================================")
+def rotina_situacao_evento():
+    print("\n============================================================")
+    print("🚀 ROTINA 4: SITUAÇÃO DE EVENTO ATIVOS")
+    print("============================================================")
 
-url_sit_evento = "https://api.hinova.com.br/api/sga/v2/situacao-evento/listar/ativo"
-res_sit_ev = requests.get(url_sit_evento, headers=headers_sga, timeout=30)
+    res = hinova_request("GET", "https://api.hinova.com.br/api/sga/v2/situacao-evento/listar/ativo", timeout=30)
+    if res.status_code != 200:
+        raise RuntimeError(f"Erro {res.status_code}: {res.text}")
 
-if res_sit_ev.status_code == 200:
-    dados_sit_ev = res_sit_ev.json()
-    df_sit_evento = pd.DataFrame(dados_sit_ev)
-    print(f"✅ Registros encontrados: {len(df_sit_evento)}")
-    enviar_para_sheets_em_lotes(service, SPREADSHEET_ID, "SITUAÇÃO DE EVENTO ATIVOS SGA", df_sit_evento)
-else:
-    print(f"❌ Erro {res_sit_ev.status_code}: {res_sit_ev.text}")
+    df = pd.DataFrame(res.json())
+    print(f"✅ Registros encontrados: {len(df)}")
+    enviar_para_sheets_em_lotes(service, SPREADSHEET_ID, "SITUAÇÃO DE EVENTO ATIVOS SGA", df)
 
 
 # ============================================================
 # ROTINA 5: POWER CRM (DADOS DE CRIAÇÃO)
 # ============================================================
-print("\n============================================================")
-print("🚀 ROTINA 5: POWER CRM - CRIAÇÃO")
-print("============================================================")
+def rotina_crm():
+    print("\n============================================================")
+    print("🚀 ROTINA 5: POWER CRM - CRIAÇÃO")
+    print("============================================================")
 
-if TOKEN_CRM:
+    if not TOKEN_CRM:
+        print("⚠️ TOKEN_CRM ausente. Pulando extração do Power CRM.")
+        return
+
     url_crm = "https://api.powercrm.com.br/api/report/db"
     headers_crm = {
         "accept": "application/json",
@@ -385,23 +503,51 @@ if TOKEN_CRM:
             "stringFilterTypeDate": 1
         }
 
-        res_crm = requests.post(url_crm, headers=headers_crm, json=payload_crm, timeout=30)
+        ok = False
+        for tentativa in range(1, 4):
+            res_crm = requests.post(url_crm, headers=headers_crm, json=payload_crm, timeout=60)
+            if res_crm.status_code == 200:
+                data = res_crm.json()
+                if isinstance(data, list):
+                    all_crm_data.extend(data)
+                print(f"✅ CRM ({payload_crm['from']} a {payload_crm['to']}): {len(all_crm_data)} acumulados")
+                ok = True
+                break
+            print(f"⚠️ Erro {res_crm.status_code} no CRM (tentativa {tentativa}/3): {res_crm.text[:200]}")
+            time.sleep(5 * tentativa)
 
-        if res_crm.status_code == 200:
-            data = res_crm.json()
-            if isinstance(data, list):
-                all_crm_data.extend(data)
-            print(f"✅ CRM ({payload_crm['from']} a {payload_crm['to']}): {len(all_crm_data)} acumulados")
-        else:
-            print(f"❌ Erro {res_crm.status_code} no CRM ({payload_crm['from']} a {payload_crm['to']}): {res_crm.text}")
-            time.sleep(3)
+        if not ok:
+            # aborta para não sobrescrever a aba com dados incompletos
+            raise RuntimeError(f"Falha no CRM na janela {payload_crm['from']} a {payload_crm['to']}")
 
         current_start = current_end + timedelta(days=1)
+        time.sleep(0.5)
 
     df_crm = pd.DataFrame(all_crm_data)
     print(f"✅ Total de registros CRM: {len(df_crm)}")
     enviar_para_sheets_em_lotes(service, SPREADSHEET_ID, "Dados de Criação CRM", df_crm)
-else:
-    print("⚠️ TOKEN_CRM ausente. Pulando extração do Power CRM.")
+
+
+# ============================================================
+# EXECUÇÃO
+# ============================================================
+rotinas = [
+    ("Eventos SGA", rotina_eventos),
+    ("DIM_SITUACAO", rotina_situacao),
+    ("Voluntários SGA", rotina_voluntarios),
+    ("Situação de Evento", rotina_situacao_evento),
+    ("Power CRM", rotina_crm),
+]
+
+for nome, func in rotinas:
+    try:
+        func()
+    except Exception as e:  # SystemExit (token bloqueado) NÃO é capturado aqui, de propósito
+        print(f"❌ Rotina '{nome}' falhou: {e}")
+        falhas.append(nome)
+
+if falhas:
+    print(f"\n⚠️ Finalizado com falhas em: {', '.join(falhas)}")
+    raise SystemExit(1)
 
 print("\n🎉 Todas as rotinas foram executadas com sucesso!")
