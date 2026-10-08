@@ -84,8 +84,10 @@ if not all([TOKEN_SGA, USUARIO_API, SENHA_API]):
 # ---------------- AUTENTICAÇÃO NA HINOVA ----------------
 print("🔐 Autenticando na API Hinova...")
 url_autenticacao = "https://api.hinova.com.br/api/sga/v2/usuario/autenticar"
+
+# CORREÇÃO: O token SGA de autenticação no POST inicial vai direto, sem a palavra Bearer
 headers_auth = {
-    "Authorization": f"Bearer {TOKEN_SGA}",
+    "Authorization": TOKEN_SGA,
     "Content-Type": "application/json"
 }
 payload_auth = {
@@ -105,11 +107,12 @@ token_usuario = dados_auth.get("token_usuario") or dados_auth.get("token_usuári
 
 if not token_usuario:
     print("❌ Token de usuário não retornado pela API.")
+    print("Resposta recebida:", res_auth.text)
     raise SystemExit(1)
 
-print(f"✅ Autenticação realizada com sucesso!")
+print("✅ Autenticação realizada com sucesso!")
 
-# Cabeçalho padrão usando o token de usuário gerado
+# Cabeçalho oficial para todas as rotinas SGA utilizando o token obtido
 headers_sga = {
     "Authorization": f"Bearer {token_usuario}",
     "Content-Type": "application/json",
@@ -166,7 +169,7 @@ def get_eventos(data_inicio, data_fim):
 
         eventos.extend(dados)
         inicio_paginacao += quantidade_por_pagina
-        time.sleep(0.3)
+        time.sleep(0.5)
 
     return eventos
 
@@ -294,7 +297,7 @@ def get_voluntarios():
         if qtd < registros_por_pagina:
             break
         pagina += 1
-        time.sleep(0.3)
+        time.sleep(0.5)
 
     return voluntarios
 
