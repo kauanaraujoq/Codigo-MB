@@ -85,9 +85,8 @@ if not all([TOKEN_SGA, USUARIO_API, SENHA_API]):
 print("🔐 Autenticando na API Hinova...")
 url_autenticacao = "https://api.hinova.com.br/api/sga/v2/usuario/autenticar"
 
-# CORREÇÃO: O token SGA de autenticação no POST inicial vai direto, sem a palavra Bearer
 headers_auth = {
-    "Authorization": TOKEN_SGA,
+    "Authorization": f"Bearer {TOKEN_SGA}",
     "Content-Type": "application/json"
 }
 payload_auth = {
