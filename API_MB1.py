@@ -357,97 +357,10 @@ else:
 
 
 # ============================================================
-# ROTINA 5: EXTRAÇÃO DE VEÍCULOS (SGA)
+# ROTINA 5: POWER CRM (DADOS DE CRIAÇÃO)
 # ============================================================
 print("\n============================================================")
-print("🚀 ROTINA 5: LISTAGEM DE VEÍCULOS SGA")
-print("============================================================")
-
-def get_veiculos_por_situacao(codigo_situacao):
-    url_veiculo = "https://api.hinova.com.br/api/sga/v2/listar/veiculo"
-    veiculos = []
-    inicio_paginacao = 0
-    quantidade_por_pagina = 1500
-
-    while True:
-        payload = {
-            "codigo_situacao": codigo_situacao,
-            "inicio_paginacao": inicio_paginacao,
-            "quantidade_por_pagina": quantidade_por_pagina
-        }
-
-        response = requests.post(url_veiculo, headers=headers_sga, json=payload, timeout=(30, 120))
-
-        if response.status_code == 406:
-            break
-        if response.status_code != 200:
-            print(f"❌ Erro {response.status_code} ao buscar veículos: {response.text}")
-            break
-
-        dados = response.json()
-        lista = dados.get("veiculos", []) if isinstance(dados, dict) else []
-
-        if not lista:
-            break
-
-        veiculos.extend(lista)
-        inicio_paginacao += quantidade_por_pagina
-        time.sleep(0.5)
-
-    return veiculos
-
-def transformar_veiculos_df(veiculos):
-    linhas = []
-    for v in veiculos:
-        linha = {
-            "codigo_veiculo": v.get("codigo_veiculo"),
-            "codigo_associado": v.get("codigo_associado"),
-            "codigo_situacao_veiculo": v.get("codigo_situacao_veiculo") or v.get("codigo_situacao") or v.get("situacao"),
-            "placa": v.get("placa"),
-            "chassi": v.get("chassi"),
-            "renavam": v.get("renavam"),
-            "marca": v.get("marca"),
-            "modelo": v.get("modelo"),
-            "categoria": v.get("categoria"),
-            "tipo": v.get("tipo"),
-            "ano_fabricacao": v.get("ano_fabricacao"),
-            "ano_modelo": v.get("ano_modelo"),
-            "valor_fipe": v.get("valor_fipe"),
-            "valor_fipe_protegido": v.get("valor_fipe_protegido"),
-            "valor_adesao": v.get("valor_adesao"),
-            "data_cadastro": v.get("data_cadastro"),
-            "data_contrato": v.get("data_contrato"),
-            "data_contrato_final": v.get("data_contrato_final"),
-            "codigo_regional": v.get("codigo_regional"),
-            "codigo_cooperativa": v.get("codigo_cooperativa"),
-            "codigo_voluntario": v.get("codigo_voluntario"),
-            "nome_voluntario": v.get("nome_voluntario"),
-            "nome_associado": v.get("nome_associado"),
-            "cpf_associado": v.get("cpf_associado"),
-        }
-        linhas.append(linha)
-    return pd.DataFrame(linhas)
-
-codigos_situacao = [1]
-todos_veiculos = []
-
-for codigo in codigos_situacao:
-    print(f"⏳ Coletando veículos da situação {codigo}...")
-    veic = get_veiculos_por_situacao(codigo)
-    print(f"✅ {len(veic)} veículos encontrados.")
-    todos_veiculos.extend(veic)
-
-df_veiculos = transformar_veiculos_df(todos_veiculos)
-print(f"✅ Total geral de veículos: {len(df_veiculos)}")
-
-enviar_para_sheets_em_lotes(service, SPREADSHEET_ID, "LISTAGEM_VEICULOS_SGA", df_veiculos)
-
-
-# ============================================================
-# ROTINA 6: POWER CRM (DADOS DE CRIAÇÃO)
-# ============================================================
-print("\n============================================================")
-print("🚀 ROTINA 6: POWER CRM - CRIAÇÃO")
+print("🚀 ROTINA 5: POWER CRM - CRIAÇÃO")
 print("============================================================")
 
 if TOKEN_CRM:
