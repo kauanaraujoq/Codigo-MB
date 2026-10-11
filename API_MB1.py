@@ -72,66 +72,9 @@ def enviar_para_sheets_em_lotes(service, spreadsheet_id, sheet_name, df, tamanho
 # ============================================================
 print("🔎 Verificando variáveis de ambiente...")
 
-TOKEN_SGA = os.environ.get("TOKEN_SGA")
-USUARIO_API = os.environ.get("USUARIO_API")
-SENHA_API = os.environ.get("SENHA_API")
 TOKEN_CRM = os.environ.get("TOKEN_CRM")
-
-if not all([TOKEN_SGA, USUARIO_API, SENHA_API]):
-    raise SystemExit("❌ Variáveis TOKEN_SGA, USUARIO_API ou SENHA_API ausentes.")
-
-print("🔐 Autenticando na API Hinova...")
-res_auth = requests.post(
-    "https://api.hinova.com.br/api/sga/v2/usuario/autenticar",
-    headers={"Authorization": f"Bearer {TOKEN_SGA}", "Content-Type": "application/json"},
-    json={"usuario": USUARIO_API, "senha": SENHA_API},
-    timeout=30
-)
-
-if res_auth.status_code != 200:
-    print(f"❌ Erro {res_auth.status_code} na autenticação:\n{res_auth.text}")
-    raise SystemExit(1)
-
-dados_auth = res_auth.json()
-token_usuario = dados_auth.get("token_usuario") or dados_auth.get("token_usuário")
-if not token_usuario:
-    print("❌ Token de usuário não retornado pela API.")
-    print("Resposta recebida:", res_auth.text)
-    raise SystemExit(1)
-
-print("✅ Autenticação realizada com sucesso!")
-
-headers_sga = {
-    "Authorization": f"Bearer {token_usuario}",
-    "Content-Type": "application/json",
-    "Accept": "application/json"
-}
-
-
-def hinova_request(method, url, **kwargs):
-    """Chamada à Hinova. Se o token estiver bloqueado, encerra o script na hora."""
-    kwargs.setdefault("timeout", 30)
-    r = None
-    for tentativa in range(1, 4):
-        try:
-            r = requests.request(method, url, headers=headers_sga, **kwargs)
-        except (requests.Timeout, requests.ConnectionError) as e:
-            print(f"⚠️ Erro de rede (tentativa {tentativa}/3): {e}")
-            time.sleep(10 * tentativa)
-            continue
-
-        if r.status_code == 403 and "BLOQUEADO" in r.text.upper():
-            raise SystemExit("❌ Token BLOQUEADO pela Hinova. Execução interrompida. Aguarde ~1h.")
-        if r.status_code in (429, 500, 502, 503, 504):
-            print(f"⚠️ HTTP {r.status_code} (tentativa {tentativa}/3). Aguardando...")
-            time.sleep(10 * tentativa)
-            continue
-        return r
-
-    if r is None:
-        raise RuntimeError(f"Sem resposta da API após 3 tentativas: {url}")
-    return r
-
+if not TOKEN_CRM:
+    raise SystemExit("❌ Variável TOKEN_CRM ausente.")
 
 # ---------------- CONEXÃO GOOGLE SHEETS ----------------
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -148,115 +91,10 @@ service = build("sheets", "v4", credentials=creds)
 
 
 # ============================================================
-# ROTINA 1: DIM_SITUACAO
-# ============================================================
-def rotina_situacao():
-    print("\n🚀 ROTINA 1: DIM_SITUACAO")
-    res = hinova_request("GET", "https://api.hinova.com.br/api/sga/v2/listar/situacao/todos")
-    if res.status_code != 200:
-        raise RuntimeError(f"Erro {res.status_code} ao buscar situações: {res.text}")
-
-    dados = res.json()
-    if isinstance(dados, dict):
-        dados = [dados]
-    df = pd.DataFrame(dados)
-    if not df.empty and "codigo_situacao" in df.columns:
-        df = df.sort_values("codigo_situacao")
-    print(f"✅ Situações coletadas: {len(df)}")
-    enviar_para_sheets_em_lotes(service, SPREADSHEET_ID, "DIM_SITUACAO", df)
-
-
-# ============================================================
-# ROTINA 2: VOLUNTÁRIOS ATIVOS
-# ============================================================
-def get_voluntarios():
-    url = "https://api.hinova.com.br/api/sga/v2/listar/voluntario/ativo"
-    voluntarios = []
-    pagina = 0
-    registros_por_pagina = 5000
-
-    while True:
-        res = hinova_request("GET", f"{url}?pagina={pagina}")
-        if res.status_code != 200:
-            raise RuntimeError(f"Erro {res.status_code} na página {pagina}: {res.text}")
-
-        dados = res.json()
-        qtd = len(dados) if isinstance(dados, list) else 0
-        if qtd == 0:
-            break
-
-        voluntarios.extend(dados)
-        print(f"✅ Página {pagina} coletada ({qtd} registros, total: {len(voluntarios)})")
-
-        if qtd < registros_por_pagina:
-            break
-        pagina += 1
-        time.sleep(1)
-
-    return voluntarios
-
-
-def transformar_voluntarios_df(voluntarios):
-    linhas = []
-    for v in voluntarios:
-        cooperativas = ", ".join(
-            (c.get("nome_cooperativa") or "") for c in (v.get("cooperativas") or []) if isinstance(c, dict)
-        )
-        linhas.append({
-            "codigo_voluntario": v.get("codigo_voluntario"),
-            "nome": v.get("nome"),
-            "cpf": v.get("cpf"),
-            "cep": v.get("cep"),
-            "telefone": v.get("telefone"),
-            "celular": v.get("celular"),
-            "email": v.get("email"),
-            "logradouro": v.get("logradouro"),
-            "numero": v.get("numero"),
-            "complemento": v.get("complemento"),
-            "bairro": v.get("bairro"),
-            "cidade": v.get("cidade"),
-            "estado": v.get("estado"),
-            "situacao": v.get("situacao"),
-            "formato_pagamento": v.get("formato_pagamento"),
-            "valor_pagamento": v.get("valor_pagamento"),
-            "formato_pagamento_residual": v.get("formato_pagamento_residual"),
-            "valor_pagamento_residual": v.get("valor_pagamento_residual"),
-            "codigo_classificacao": v.get("codigo_classificacao"),
-            "obs": v.get("obs"),
-            "cooperativas": cooperativas
-        })
-    return pd.DataFrame(linhas)
-
-
-def rotina_voluntarios():
-    print("\n🚀 ROTINA 2: VOLUNTÁRIOS SGA")
-    df = transformar_voluntarios_df(get_voluntarios())
-    print(f"✅ Total de voluntários: {len(df)}")
-    enviar_para_sheets_em_lotes(service, SPREADSHEET_ID, "Voluntarios SGA", df)
-
-
-# ============================================================
-# ROTINA 3: SITUAÇÃO DE EVENTO ATIVOS
-# ============================================================
-def rotina_situacao_evento():
-    print("\n🚀 ROTINA 3: SITUAÇÃO DE EVENTO ATIVOS")
-    res = hinova_request("GET", "https://api.hinova.com.br/api/sga/v2/situacao-evento/listar/ativo")
-    if res.status_code != 200:
-        raise RuntimeError(f"Erro {res.status_code}: {res.text}")
-
-    df = pd.DataFrame(res.json())
-    print(f"✅ Registros encontrados: {len(df)}")
-    enviar_para_sheets_em_lotes(service, SPREADSHEET_ID, "SITUAÇÃO DE EVENTO ATIVOS SGA", df)
-
-
-# ============================================================
-# ROTINA 4: POWER CRM (RESILIENTE COM SESSION E RETRY)
+# ROTINA: POWER CRM (RESILIENTE COM SESSION E RETRY)
 # ============================================================
 def rotina_crm():
-    print("\n🚀 ROTINA 4: POWER CRM - CRIAÇÃO")
-    if not TOKEN_CRM:
-        print("⚠️ TOKEN_CRM ausente. Pulando extração do Power CRM.")
-        return
+    print("\n🚀 POWER CRM - CRIAÇÃO")
 
     url_crm = "https://api.powercrm.com.br/api/report/db"
     headers_crm = {
@@ -293,7 +131,7 @@ def rotina_crm():
                 print(f"⚠️ Erro {res.status_code} no CRM (tentativa {tentativa}/3): {res.text[:200]}")
             except requests.RequestException as e:
                 print(f"⚠️ Desconexão/Erro de rede no CRM na janela {payload['from']} a {payload['to']} (tentativa {tentativa}/3): {e}")
-            
+
             time.sleep(5 * tentativa)
 
         if not ok:
@@ -310,21 +148,10 @@ def rotina_crm():
 # ============================================================
 # EXECUÇÃO
 # ============================================================
-falhas = []
-for nome, func in [
-    ("DIM_SITUACAO", rotina_situacao),
-    ("Voluntários SGA", rotina_voluntarios),
-    ("Situação de Evento", rotina_situacao_evento),
-    ("Power CRM", rotina_crm),
-]:
-    try:
-        func()
-    except Exception as e:  # SystemExit (token bloqueado) não é capturado, de propósito
-        print(f"❌ Rotina '{nome}' falhou: {e}")
-        falhas.append(nome)
-
-if falhas:
-    print(f"\n⚠️ Finalizado com falhas em: {', '.join(falhas)}")
+try:
+    rotina_crm()
+except Exception as e:
+    print(f"❌ Rotina 'Power CRM' falhou: {e}")
     raise SystemExit(1)
 
-print("\n🎉 Todas as rotinas foram executadas com sucesso!")
+print("\n🎉 Execução concluída com sucesso!")
