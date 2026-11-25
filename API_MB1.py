@@ -12,6 +12,14 @@ SPREADSHEET_ID = "1og7UWrfw0kJ2ju53gtP44F3X97q5vLIiQh2GPpLz_Xo"
 SERVICE_ACCOUNT_FILE = "teste-477018-5cb1426a435b.json"
 TAMANHO_LOTE_SHEETS = 2000
 
+# Retry / divisão de janelas
+MAX_TENTATIVAS = 6            # tentativas por requisição
+ESPERA_INICIAL = 15           # segundos (dobra a cada tentativa)
+ESPERA_MAXIMA = 240           # teto da espera
+NIVEL_MAX_DIVISAO = 5         # 30d -> 15d -> 8d -> 4d -> 2d -> 1d
+STATUS_RETENTAVEIS = {429, 500, 502, 503, 504}
+PERMITIR_PARCIAL = os.environ.get("PERMITIR_PARCIAL", "0") == "1"
+
 
 # ============================================================
 # 1. ENVIO EM LOTES PARA O GOOGLE SHEETS
@@ -76,7 +84,6 @@ TOKEN_CRM = os.environ.get("TOKEN_CRM")
 if not TOKEN_CRM:
     raise SystemExit("❌ Variável TOKEN_CRM ausente.")
 
-# ---------------- CONEXÃO GOOGLE SHEETS ----------------
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 if os.path.exists(SERVICE_ACCOUNT_FILE):
@@ -91,12 +98,69 @@ service = build("sheets", "v4", credentials=creds)
 
 
 # ============================================================
-# ROTINA: POWER CRM (RESILIENTE COM SESSION E RETRY)
+# ROTINA: POWER CRM (RETRY COM BACKOFF + DIVISÃO DE JANELA)
 # ============================================================
+class FalhaCRM(Exception):
+    pass
+
+
+URL_CRM = "https://api.powercrm.com.br/api/report/db"
+
+
+def chamar_crm(session, headers, inicio, fim):
+    """Uma janela, com retry e backoff exponencial. Levanta FalhaCRM se esgotar."""
+    payload = {
+        "from": inicio.strftime("%Y-%m-%d"),
+        "to": fim.strftime("%Y-%m-%d"),
+        "stringFilterTypeDate": 1
+    }
+    espera = ESPERA_INICIAL
+
+    for tentativa in range(1, MAX_TENTATIVAS + 1):
+        try:
+            res = session.post(URL_CRM, headers=headers, json=payload, timeout=120)
+            if res.status_code == 200:
+                data = res.json()
+                return data if isinstance(data, list) else []
+
+            print(f"⚠️ Erro {res.status_code} no CRM ({payload['from']} a {payload['to']}, "
+                  f"tentativa {tentativa}/{MAX_TENTATIVAS}): {res.text[:150]}")
+            if res.status_code not in STATUS_RETENTAVEIS:
+                # 401/403/400 etc.: repetir não adianta
+                raise SystemExit(f"❌ Erro não retentável {res.status_code}: {res.text[:200]}")
+        except requests.RequestException as e:
+            print(f"⚠️ Erro de rede no CRM ({payload['from']} a {payload['to']}, "
+                  f"tentativa {tentativa}/{MAX_TENTATIVAS}): {e}")
+
+        if tentativa < MAX_TENTATIVAS:
+            time.sleep(espera)
+            espera = min(espera * 2, ESPERA_MAXIMA)
+
+    raise FalhaCRM(f"{payload['from']} a {payload['to']}")
+
+
+def buscar_janela(session, headers, inicio, fim, nivel=0):
+    """Tenta a janela inteira; se falhar, divide ao meio e tenta cada metade."""
+    try:
+        dados = chamar_crm(session, headers, inicio, fim)
+        print(f"✅ CRM ({inicio:%Y-%m-%d} a {fim:%Y-%m-%d}): {len(dados)} registros")
+        return dados, []
+    except FalhaCRM:
+        dias = (fim - inicio).days
+        if dias < 1 or nivel >= NIVEL_MAX_DIVISAO:
+            print(f"❌ Janela {inicio:%Y-%m-%d} a {fim:%Y-%m-%d} não recuperada.")
+            return [], [(inicio, fim)]
+
+        meio = inicio + timedelta(days=dias // 2)
+        print(f"✂️ Dividindo {inicio:%Y-%m-%d} a {fim:%Y-%m-%d} em duas partes...")
+        d1, f1 = buscar_janela(session, headers, inicio, meio, nivel + 1)
+        d2, f2 = buscar_janela(session, headers, meio + timedelta(days=1), fim, nivel + 1)
+        return d1 + d2, f1 + f2
+
+
 def rotina_crm():
     print("\n🚀 POWER CRM - CRIAÇÃO")
 
-    url_crm = "https://api.powercrm.com.br/api/report/db"
     headers_crm = {
         "accept": "application/json",
         "content-type": "application/json",
@@ -106,39 +170,29 @@ def rotina_crm():
     end_date = datetime.today()
     current_start = datetime(2023, 1, 1)
     all_crm_data = []
+    janelas_falhas = []
 
     session_crm = requests.Session()
 
     while current_start < end_date:
         current_end = min(current_start + timedelta(days=29), end_date)
-        payload = {
-            "from": current_start.strftime("%Y-%m-%d"),
-            "to": current_end.strftime("%Y-%m-%d"),
-            "stringFilterTypeDate": 1
-        }
 
-        ok = False
-        for tentativa in range(1, 4):
-            try:
-                res = session_crm.post(url_crm, headers=headers_crm, json=payload, timeout=60)
-                if res.status_code == 200:
-                    data = res.json()
-                    if isinstance(data, list):
-                        all_crm_data.extend(data)
-                    print(f"✅ CRM ({payload['from']} a {payload['to']}): {len(all_crm_data)} acumulados")
-                    ok = True
-                    break
-                print(f"⚠️ Erro {res.status_code} no CRM (tentativa {tentativa}/3): {res.text[:200]}")
-            except requests.RequestException as e:
-                print(f"⚠️ Desconexão/Erro de rede no CRM na janela {payload['from']} a {payload['to']} (tentativa {tentativa}/3): {e}")
-
-            time.sleep(5 * tentativa)
-
-        if not ok:
-            raise RuntimeError(f"Falha no CRM na janela {payload['from']} a {payload['to']}")
+        dados, falhas = buscar_janela(session_crm, headers_crm, current_start, current_end)
+        all_crm_data.extend(dados)
+        janelas_falhas.extend(falhas)
+        print(f"   acumulado: {len(all_crm_data)}")
 
         current_start = current_end + timedelta(days=1)
         time.sleep(1.5)
+
+    if janelas_falhas:
+        lista = "\n".join(f"  - {a:%Y-%m-%d} a {b:%Y-%m-%d}" for a, b in janelas_falhas)
+        print(f"\n⚠️ Janelas que falharam:\n{lista}")
+        if not PERMITIR_PARCIAL:
+            raise RuntimeError(
+                "Há janelas sem dados. A planilha NÃO foi alterada para não perder histórico. "
+                "Rode de novo mais tarde ou defina PERMITIR_PARCIAL=1 para enviar mesmo assim."
+            )
 
     df_crm = pd.DataFrame(all_crm_data)
     print(f"✅ Total de registros CRM: {len(df_crm)}")
